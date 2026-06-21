@@ -97,12 +97,12 @@ async function run() {
 
 
 
-
+    // buyer 
     app.post('/api/orders', async (req, res) => {
-      const { sessionId } = req.body; 
+      const { sessionId } = req.body;
 
       try {
-        
+
         const existingOrder = await ordersCollection.findOne({ sessionId });
         if (existingOrder) {
           return res.status(200).json({
@@ -112,7 +112,7 @@ async function run() {
           });
         }
 
-       
+
         const session = await stripe.checkout.sessions.retrieve(sessionId);
         const meta = session.metadata;
 
@@ -120,7 +120,7 @@ async function run() {
           return res.status(400).json({ message: "Payment not verified or completed" });
         }
 
-       
+
         const buyerInfo = {
           userId: meta.buyerId,
           name: meta.buyerName,
@@ -141,14 +141,14 @@ async function run() {
           buyerInfo,
           sellerInfo,
           productId: meta.productId,
-          paymentStatus: session.payment_status, 
+          paymentStatus: session.payment_status,
           orderStatus: "processing",
           createdAt: new Date()
         };
 
         const orderResult = await ordersCollection.insertOne(newOrder);
 
-        
+
         const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
         if (product) {
           if (product.stock <= 1) {
@@ -159,12 +159,12 @@ async function run() {
           } else {
             await productsCollection.updateOne(
               { _id: new ObjectId(meta.productId) },
-              { $set: { stock: product.stock - 1 } } 
+              { $set: { stock: product.stock - 1 } }
             );
           }
         }
 
-        
+
         return res.status(201).json({
           success: true,
           message: "Order placed and stock updated successfully",
@@ -177,6 +177,75 @@ async function run() {
       } catch (error) {
         console.error(error);
         return res.status(500).json({ message: "Failed to process order", error: error.message });
+      }
+    });
+
+
+    
+    app.get('/api/buyer/my-orders/:email', async (req, res) => {
+      try {
+        const email = req.params.email;
+
+       
+        const orders = await ordersCollection.find({ "buyerInfo.email": email }).sort({ createdAt: -1 }).toArray();
+
+       
+        const ordersWithProductDetails = await Promise.all(orders.map(async (order) => {
+          let productInfo = null;
+          try {
+            productInfo = await productsCollection.findOne({ _id: new ObjectId(order.productId) });
+          } catch (err) {
+            
+          }
+
+          return {
+            ...order,
+            productTitle: productInfo?.title || "Product Unavailable",
+            productImage: productInfo?.images?.[0] || productInfo?.image || "https://via.placeholder.com/150",
+            productPrice: productInfo?.price || 0
+          };
+        }));
+
+        res.send(ordersWithProductDetails);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch orders", error });
+      }
+    });
+
+    
+    app.patch('/api/orders/:id/cancel', async (req, res) => {
+      try {
+        const orderId = req.params.id;
+        const query = { _id: new ObjectId(orderId) };
+
+        
+        const order = await ordersCollection.findOne(query);
+        if (!order) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+
+        
+        if (order.orderStatus !== 'pending' && order.orderStatus !== 'processing') {
+          return res.status(400).send({ message: "Order cannot be cancelled at this stage." });
+        }
+
+        
+        const updateResult = await ordersCollection.updateOne(query, {
+          $set: { orderStatus: "cancelled" }
+        });
+
+        
+        await productsCollection.updateOne(
+          { _id: new ObjectId(order.productId) },
+          {
+            $inc: { stock: 1 },
+            $set: { status: "available" } 
+          }
+        );
+
+        res.send({ success: true, message: "Order cancelled successfully and product restocked." });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to cancel order", error });
       }
     });
 
