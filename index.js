@@ -3,7 +3,9 @@ const cors = require('cors');
 const app = express()
 const port = 9000
 
+
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 
 app.use(cors())
@@ -36,6 +38,7 @@ async function run() {
     await client.connect();
     const database = client.db("ri-resell-hub-client");
     const productsCollection = database.collection("products");
+    const ordersCollection = database.collection("orders");
 
     app.get('/api/all/products', async (req, res) => {
       try {
@@ -65,7 +68,7 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch product", error });
       }
     });
-
+    // seller get all products
     app.get('/api/products', async (req, res) => {
       const query = {};
       if (req.query.sellerId) {
@@ -92,6 +95,90 @@ async function run() {
       res.send(result);
     });
 
+
+
+
+    app.post('/api/orders', async (req, res) => {
+      const { sessionId } = req.body; 
+
+      try {
+        
+        const existingOrder = await ordersCollection.findOne({ sessionId });
+        if (existingOrder) {
+          return res.status(200).json({
+            success: true,
+            message: "Order already processed",
+            order: existingOrder
+          });
+        }
+
+       
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        const meta = session.metadata;
+
+        if (!session || session.payment_status !== 'paid') {
+          return res.status(400).json({ message: "Payment not verified or completed" });
+        }
+
+       
+        const buyerInfo = {
+          userId: meta.buyerId,
+          name: meta.buyerName,
+          email: meta.buyerMail,
+          phone: meta.buyerPhone,
+          address: meta.buyerAddress
+        };
+
+        const sellerInfo = {
+          userId: meta.sellerId,
+          name: meta.sellerName,
+          email: meta.sellerEmail,
+          phone: meta.sellerPhone
+        };
+
+        const newOrder = {
+          sessionId,
+          buyerInfo,
+          sellerInfo,
+          productId: meta.productId,
+          paymentStatus: session.payment_status, 
+          orderStatus: "processing",
+          createdAt: new Date()
+        };
+
+        const orderResult = await ordersCollection.insertOne(newOrder);
+
+        
+        const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
+        if (product) {
+          if (product.stock <= 1) {
+            await productsCollection.updateOne(
+              { _id: new ObjectId(meta.productId) },
+              { $set: { stock: 0, status: "sold" } }
+            );
+          } else {
+            await productsCollection.updateOne(
+              { _id: new ObjectId(meta.productId) },
+              { $set: { stock: product.stock - 1 } } 
+            );
+          }
+        }
+
+        
+        return res.status(201).json({
+          success: true,
+          message: "Order placed and stock updated successfully",
+          order: {
+            _id: orderResult.insertedId,
+            ...newOrder
+          }
+        });
+
+      } catch (error) {
+        console.error(error);
+        return res.status(500).json({ message: "Failed to process order", error: error.message });
+      }
+    });
 
 
 
