@@ -5,10 +5,75 @@ const port = 9000
 
 
 require('dotenv').config();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
+
+
 
 
 app.use(cors())
+
+let productsCollection;
+let ordersCollection;
+let wishlistCollection;
+let usersCollection;
+let paymentsCollection;
+let paymentsCollect
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const metadata = session.metadata;
+
+    try {
+      const paymentInfo = {
+        stripeSessionId: session.id,
+        amountPaid: session.amount_total / 100,
+        currency: session.currency,
+        paymentStatus: session.payment_status,
+        createdAt: new Date(),
+
+        buyer: {
+          id: metadata.buyerId,
+          name: metadata.buyerName,
+          email: metadata.buyerMail, 
+          phone: metadata.buyerPhone,
+          address: metadata.buyerAddress
+        },
+        product: {
+          id: metadata.productId,
+          title: metadata.productTitle, 
+          image: metadata.productImage,
+          seller: {
+            id: metadata.sellerId,
+            name: metadata.sellerName,
+            email: metadata.sellerEmail,
+            phone: metadata.sellerPhone
+          }
+        }
+      };
+
+   
+      const result = await paymentsCollection.insertOne(paymentInfo);
+      console.log("💳 Payment successfully saved to database!", result.insertedId);
+
+    } catch (dbError) {
+      console.error("Failed to save payment to database:", dbError);
+      return res.status(500).send("Database Insertion Error");
+    }
+  }
+
+  res.send({ received: true });
+});
+
 app.use(express.json());
 
 
@@ -36,11 +101,12 @@ async function run() {
     // Connect the client to the server	(optional starting in v4.7)
 
     await client.connect();
-    const database = client.db("ri-resell-hub-client");
-    const productsCollection = database.collection("products");
-    const ordersCollection = database.collection("orders");
-    const wishlistCollection = database.collection("wishlist");
-    const usersCollection = database.collection("user");
+     database = client.db("ri-resell-hub-client");
+     productsCollection = database.collection("products");
+     ordersCollection = database.collection("orders");
+     wishlistCollection = database.collection("wishlist");
+     usersCollection = database.collection("user");
+     paymentsCollection = database.collection("payments");
 
     app.get('/api/all/products', async (req, res) => {
       try {
@@ -468,6 +534,25 @@ async function run() {
 
       } catch (error) {
         console.error("Password change error:", error);
+        res.status(500).send({ success: false, message: "Internal server error." });
+      }
+    });
+
+
+
+
+    app.get('/api/payments/buyer/:email', async (req, res) => {
+      try {
+        const { email } = req.params;
+
+        const payments = await paymentsCollection
+          .find({ "buyer.email": email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send({ success: true, data: payments });
+      } catch (error) {
+        console.error("Fetch payment history error:", error);
         res.status(500).send({ success: false, message: "Internal server error." });
       }
     });
