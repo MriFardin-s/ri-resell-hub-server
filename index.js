@@ -409,6 +409,70 @@ async function run() {
 
 
 
+    app.patch('/api/users/update-profile', async (req, res) => {
+      try {
+        const { email, name, phone, address, image } = req.body;
+
+        if (!email) {
+          return res.status(400).send({ success: false, message: "Email is required!" });
+        }
+
+        const result = await usersCollection.updateOne(
+          { email: email },
+          {
+            $set: {
+              name,
+              phone,
+              address,
+              image,
+              updatedAt: new Date()
+            }
+          }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(400).send({ success: false, message: "No changes were made or user not found." });
+        }
+
+        res.send({ success: true, message: "Public profile updated successfully!" });
+
+      } catch (error) {
+        console.error("Profile update error:", error);
+        res.status(500).send({ success: false, message: "Internal server error." });
+      }
+    });
+
+    app.patch('/api/users/change-password', async (req, res) => {
+      try {
+        const { email, currentPassword, newPassword } = req.body;
+
+        if (!email || !currentPassword || !newPassword) {
+          return res.status(400).send({ success: false, message: "All fields are required!" });
+        }
+
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).send({ success: false, message: "User not found!" });
+        }
+
+        if (user.password !== currentPassword) {
+          return res.status(400).send({ success: false, message: "Current password is incorrect!" });
+        }
+
+        await usersCollection.updateOne(
+          { email },
+          { $set: { password: newPassword, passwordUpdatedAt: new Date() } }
+        );
+
+        res.send({ success: true, message: "Password changed successfully!" });
+
+      } catch (error) {
+        console.error("Password change error:", error);
+        res.status(500).send({ success: false, message: "Internal server error." });
+      }
+    });
+
+
 
 
     // Send a ping to confirm a successful connection
