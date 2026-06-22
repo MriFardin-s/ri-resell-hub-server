@@ -39,6 +39,8 @@ async function run() {
     const database = client.db("ri-resell-hub-client");
     const productsCollection = database.collection("products");
     const ordersCollection = database.collection("orders");
+    const wishlistCollection = database.collection("wishlist");
+    const usersCollection = database.collection("user");
 
     app.get('/api/all/products', async (req, res) => {
       try {
@@ -181,28 +183,29 @@ async function run() {
     });
 
 
-    
+
     app.get('/api/buyer/my-orders/:email', async (req, res) => {
       try {
         const email = req.params.email;
 
-       
+
         const orders = await ordersCollection.find({ "buyerInfo.email": email }).sort({ createdAt: -1 }).toArray();
 
-       
+
         const ordersWithProductDetails = await Promise.all(orders.map(async (order) => {
           let productInfo = null;
           try {
             productInfo = await productsCollection.findOne({ _id: new ObjectId(order.productId) });
           } catch (err) {
-            
+
           }
 
           return {
             ...order,
             productTitle: productInfo?.title || "Product Unavailable",
             productImage: productInfo?.images?.[0] || productInfo?.image || "https://via.placeholder.com/150",
-            productPrice: productInfo?.price || 0
+            productPrice: productInfo?.price || 0,
+            sellerInfo: productInfo?.sellerInfo || null
           };
         }));
 
@@ -212,34 +215,34 @@ async function run() {
       }
     });
 
-    
+
     app.patch('/api/orders/:id/cancel', async (req, res) => {
       try {
         const orderId = req.params.id;
         const query = { _id: new ObjectId(orderId) };
 
-        
+
         const order = await ordersCollection.findOne(query);
         if (!order) {
           return res.status(404).send({ message: "Order not found" });
         }
 
-        
+
         if (order.orderStatus !== 'pending' && order.orderStatus !== 'processing') {
           return res.status(400).send({ message: "Order cannot be cancelled at this stage." });
         }
 
-        
+
         const updateResult = await ordersCollection.updateOne(query, {
           $set: { orderStatus: "cancelled" }
         });
 
-        
+
         await productsCollection.updateOne(
           { _id: new ObjectId(order.productId) },
           {
             $inc: { stock: 1 },
-            $set: { status: "available" } 
+            $set: { status: "available" }
           }
         );
 
@@ -249,6 +252,92 @@ async function run() {
       }
     });
 
+
+    // Wishlist
+
+
+    app.patch('/api/wishlist/status', async (req, res) => {
+  try {
+    const { userId, productId } = req.query;
+    console.log("Checking Wishlist Data:", { userId, productId });
+    const query = { userId, productId };
+
+    const existing = await wishlistCollection.findOne(query);
+
+    if (existing) {
+      await wishlistCollection.deleteOne(query);
+      return res.send({ success: true, isWishlisted: false, message: "Removed from wishlist" });
+    } else {
+      await wishlistCollection.insertOne({
+        userId,
+        productId,
+        createdAt: new Date()
+      });
+      const totalDocs = await wishlistCollection.countDocuments();
+
+      return res.send({ success: true, isWishlisted: true, message: "Added to wishlist!" });
+    }
+  } catch (error) {
+    res.status(500).send({ message: "Failed to update wishlist", error });
+  }
+});
+
+
+app.get('/api/wishlist/remove', async (req, res) => {
+  try {
+    const { userId, productId } = req.query; 
+    await wishlistCollection.deleteOne({ userId, productId });
+    res.send({ success: true, message: "Removed from wishlist!" });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to remove from wishlist", error });
+  }
+});
+
+   
+    app.get('/api/wishlist/status', async (req, res) => {
+      try {
+        const { userId, productId } = req.query;
+        const item = await wishlistCollection.findOne({ userId, productId });
+        res.send({ isWishlisted: !!item });
+      } catch (error) {
+        res.status(500).send({ message: "Error checking status", error });
+      }
+    });
+
+    app.get('/api/wishlist/user/:email', async (req, res) => {
+      try {
+        const email = req.params.email;
+
+     
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        const wishlistItems = await wishlistCollection.find({ userId: user._id.toString() }).toArray();
+
+
+        const itemsWithProductDetails = await Promise.all(wishlistItems.map(async (item) => {
+          let productInfo = null;
+          try {
+            productInfo = await productsCollection.findOne({ _id: new ObjectId(item.productId) });
+          } catch (err) { }
+
+          return {
+            _id: item._id,
+            productId: item.productId,
+            productTitle: productInfo?.title || "Product Unavailable",
+            productImage: productInfo?.images?.[0] || productInfo?.image || "https://via.placeholder.com/150",
+            productPrice: productInfo?.price || 0,
+            stock: productInfo?.stock || 0
+          };
+        }));
+
+        res.send(itemsWithProductDetails);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch wishlist", error });
+      }
+    });
 
 
 
