@@ -257,43 +257,43 @@ async function run() {
 
 
     app.patch('/api/wishlist/status', async (req, res) => {
-  try {
-    const { userId, productId } = req.query;
-    console.log("Checking Wishlist Data:", { userId, productId });
-    const query = { userId, productId };
+      try {
+        const { userId, productId } = req.query;
+        console.log("Checking Wishlist Data:", { userId, productId });
+        const query = { userId, productId };
 
-    const existing = await wishlistCollection.findOne(query);
+        const existing = await wishlistCollection.findOne(query);
 
-    if (existing) {
-      await wishlistCollection.deleteOne(query);
-      return res.send({ success: true, isWishlisted: false, message: "Removed from wishlist" });
-    } else {
-      await wishlistCollection.insertOne({
-        userId,
-        productId,
-        createdAt: new Date()
-      });
-      const totalDocs = await wishlistCollection.countDocuments();
+        if (existing) {
+          await wishlistCollection.deleteOne(query);
+          return res.send({ success: true, isWishlisted: false, message: "Removed from wishlist" });
+        } else {
+          await wishlistCollection.insertOne({
+            userId,
+            productId,
+            createdAt: new Date()
+          });
+          const totalDocs = await wishlistCollection.countDocuments();
 
-      return res.send({ success: true, isWishlisted: true, message: "Added to wishlist!" });
-    }
-  } catch (error) {
-    res.status(500).send({ message: "Failed to update wishlist", error });
-  }
-});
+          return res.send({ success: true, isWishlisted: true, message: "Added to wishlist!" });
+        }
+      } catch (error) {
+        res.status(500).send({ message: "Failed to update wishlist", error });
+      }
+    });
 
 
-app.get('/api/wishlist/remove', async (req, res) => {
-  try {
-    const { userId, productId } = req.query; 
-    await wishlistCollection.deleteOne({ userId, productId });
-    res.send({ success: true, message: "Removed from wishlist!" });
-  } catch (error) {
-    res.status(500).send({ message: "Failed to remove from wishlist", error });
-  }
-});
+    app.get('/api/wishlist/remove', async (req, res) => {
+      try {
+        const { userId, productId } = req.query;
+        await wishlistCollection.deleteOne({ userId, productId });
+        res.send({ success: true, message: "Removed from wishlist!" });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to remove from wishlist", error });
+      }
+    });
 
-   
+
     app.get('/api/wishlist/status', async (req, res) => {
       try {
         const { userId, productId } = req.query;
@@ -308,7 +308,7 @@ app.get('/api/wishlist/remove', async (req, res) => {
       try {
         const email = req.params.email;
 
-     
+
         const user = await usersCollection.findOne({ email });
         if (!user) {
           return res.status(404).send({ message: "User not found" });
@@ -336,6 +336,74 @@ app.get('/api/wishlist/remove', async (req, res) => {
         res.send(itemsWithProductDetails);
       } catch (error) {
         res.status(500).send({ message: "Failed to fetch wishlist", error });
+      }
+    });
+
+
+    app.get('/api/buyer/dashboard-summary', async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        if (!email) {
+          return res.status(400).send({ success: false, message: "Email parameter is required!" });
+        }
+
+
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).send({ success: false, message: "User not found!" });
+        }
+
+
+        const totalOrders = await ordersCollection.countDocuments({
+          "buyerInfo.email": email
+        });
+
+
+        const wishlistCount = await wishlistCollection.countDocuments({
+          userId: user._id.toString()
+        });
+
+
+        const recentOrdersRaw = await ordersCollection.find({ "buyerInfo.email": email })
+          .sort({ date: -1 })
+          .limit(5)
+          .toArray();
+
+
+        const recentPurchases = await Promise.all(
+          recentOrdersRaw.map(async (order) => {
+            let productInfo = null;
+
+            try {
+              if (order.productId && ObjectId.isValid(order.productId)) {
+                productInfo = await productsCollection.findOne({ _id: new ObjectId(order.productId) });
+              }
+            } catch (err) {
+              console.error("Error fetching product for order:", err.message);
+            }
+
+            return {
+              _id: order._id,
+              productName: order.productTitle || order.productName || order.title || productInfo?.title || "Product Unavailable",
+              price: order.productPrice || order.price || order.totalPrice || productInfo?.price || 0,
+              date: order.date || order.createdAt || new Date(),
+              orderStatus: order.orderStatus || 'pending'
+            };
+          })
+        );
+
+
+        res.send({
+          success: true,
+          totalOrders,
+          wishlistCount,
+          recentPurchases
+        });
+
+      } catch (error) {
+        console.error("Error fetching buyer dashboard summary:", error);
+        res.status(500).send({ success: false, message: "Internal server error", error: error.message });
       }
     });
 
