@@ -44,13 +44,13 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
         buyer: {
           id: metadata.buyerId,
           name: metadata.buyerName,
-          email: metadata.buyerMail, 
+          email: metadata.buyerMail,
           phone: metadata.buyerPhone,
           address: metadata.buyerAddress
         },
         product: {
           id: metadata.productId,
-          title: metadata.productTitle, 
+          title: metadata.productTitle,
           image: metadata.productImage,
           seller: {
             id: metadata.sellerId,
@@ -61,7 +61,7 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
         }
       };
 
-   
+
       const result = await paymentsCollection.insertOne(paymentInfo);
       console.log("💳 Payment successfully saved to database!", result.insertedId);
 
@@ -101,12 +101,12 @@ async function run() {
     // Connect the client to the server	(optional starting in v4.7)
 
     await client.connect();
-     database = client.db("ri-resell-hub-client");
-     productsCollection = database.collection("products");
-     ordersCollection = database.collection("orders");
-     wishlistCollection = database.collection("wishlist");
-     usersCollection = database.collection("user");
-     paymentsCollection = database.collection("payments");
+    database = client.db("ri-resell-hub-client");
+    productsCollection = database.collection("products");
+    ordersCollection = database.collection("orders");
+    wishlistCollection = database.collection("wishlist");
+    usersCollection = database.collection("user");
+    paymentsCollection = database.collection("payments");
 
     app.get('/api/all/products', async (req, res) => {
       try {
@@ -163,6 +163,174 @@ async function run() {
       res.send(result);
     });
 
+    //homepage
+
+    app.get('/api/seller/stats/:sellerId', async (req, res) => {
+      try {
+        const sellerId = req.params.sellerId;
+
+        const totalProducts = await productsCollection.countDocuments({
+          "sellerInfo.userId": sellerId
+        });
+
+        const totalSales = await ordersCollection.countDocuments({
+          "sellerInfo.userId": sellerId,
+          paymentStatus: "paid"
+        });
+
+        const pendingOrders = await ordersCollection.countDocuments({
+          "sellerInfo.userId": sellerId,
+          orderStatus: {
+            $in: ["pending", "processing"]
+          }
+        });
+
+        const revenueResult = await paymentsCollection.aggregate([
+          {
+            $match: {
+              "product.seller.id": sellerId,
+              paymentStatus: "paid"
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: "$amountPaid"
+              }
+            }
+          }
+        ]).toArray();
+
+        res.send({
+          totalProducts,
+          totalSales,
+          pendingOrders,
+          totalRevenue: revenueResult[0]?.totalRevenue || 0
+        });
+
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch seller stats",
+          error: error.message
+        });
+      }
+    });
+
+    // manage orders
+
+    app.get('/api/seller/orders/:sellerId', async (req, res) => {
+      const sellerId = req.params.sellerId;
+
+      const orders = await ordersCollection
+        .find({
+          'sellerInfo.userId': sellerId,
+        })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.send(orders);
+    });
+
+    app.patch('/api/orders/:id/status', async (req, res) => {
+      const { status } = req.body;
+
+      const result = await ordersCollection.updateOne(
+        {
+          _id: new ObjectId(req.params.id),
+        },
+        {
+          $set: {
+            orderStatus: status,
+          },
+        }
+      );
+
+      res.send({
+        success: result.modifiedCount > 0,
+      });
+    });
+
+    app.get('/api/seller/analytics/:sellerId', async (req, res) => {
+      try {
+        const sellerId = req.params.sellerId;
+
+        const monthlySales = await paymentsCollection.aggregate([
+          {
+            $match: {
+              "product.seller.id": sellerId,
+              paymentStatus: "paid"
+            }
+          },
+          {
+            $group: {
+              _id: {
+                month: {
+                  $month: "$createdAt"
+                }
+              },
+              totalRevenue: {
+                $sum: "$amountPaid"
+              },
+              totalSales: {
+                $sum: 1
+              }
+            }
+          },
+          {
+            $sort: {
+              "_id.month": 1
+            }
+          }
+        ]).toArray();
+
+        res.send(monthlySales);
+      } catch (error) {
+        res.status(500).send(error);
+      }
+    });
+
+    app.get('/api/seller/top-products/:sellerId', async (req, res) => {
+      try {
+        const sellerId = req.params.sellerId;
+
+        const products = await paymentsCollection.aggregate([
+          {
+            $match: {
+              "product.seller.id": sellerId,
+              paymentStatus: "paid"
+            }
+          },
+          {
+            $group: {
+              _id: "$product.id",
+              title: {
+                $first: "$product.title"
+              },
+              sales: {
+                $sum: 1
+              },
+              revenue: {
+                $sum: "$amountPaid"
+              }
+            }
+          },
+          {
+            $sort: {
+              sales: -1
+            }
+          },
+          {
+            $limit: 5
+          }
+        ]).toArray();
+
+        res.send(products);
+      } catch (error) {
+        res.status(500).send(error);
+      }
+    });
+
 
 
     // buyer 
@@ -170,7 +338,7 @@ async function run() {
       const { sessionId } = req.body;
 
       try {
-
+        // ১. চেক করুন অর্ডারটি আগেই প্রসেস করা হয়েছে কি না
         const existingOrder = await ordersCollection.findOne({ sessionId });
         if (existingOrder) {
           return res.status(200).json({
@@ -180,7 +348,7 @@ async function run() {
           });
         }
 
-
+        // ২. স্ট্রাইপ সেশন থেকে ডাটা রিট্রিভ করুন
         const session = await stripe.checkout.sessions.retrieve(sessionId);
         const meta = session.metadata;
 
@@ -188,6 +356,11 @@ async function run() {
           return res.status(400).json({ message: "Payment not verified or completed" });
         }
 
+        // ৩. ডাটাবেজ থেকে প্রোডাক্টের কারেন্ট ইনফো (দাম এবং নাম) নিয়ে আসুন
+        const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
+        if (!product) {
+          return res.status(404).json({ message: "Product not found in database" });
+        }
 
         const buyerInfo = {
           userId: meta.buyerId,
@@ -204,35 +377,42 @@ async function run() {
           phone: meta.sellerPhone
         };
 
+        // ৪. নতুন অর্ডার অবজেক্টে ফ্রন্টএন্ডের প্রয়োজনীয় সব ফিল্ড যোগ করুন
         const newOrder = {
           sessionId,
+          transactionId: session.payment_intent, // 🎯 স্ট্রাইপের ট্রানজেকশন আইডি (Payment Intent ID)
+          amount: session.amount_total / 100,     // 🎯 ফ্রন্টএন্ডের orderData?.amount এর জন্য সঠিক ফরম্যাট
+          currency: session.currency,
           buyerInfo,
           sellerInfo,
           productId: meta.productId,
+          productDetails: {                       // 🎯 Order Summary দেখানোর জন্য প্রোডাক্ট ডিটেইলস
+            title: product.title,
+            image: product.image || product.images?.[0] || "",
+            price: product.price
+          },
           paymentStatus: session.payment_status,
           orderStatus: "processing",
           createdAt: new Date()
         };
 
+        // ৫. অর্ডার ডাটাবেজে ইনসার্ট করুন
         const orderResult = await ordersCollection.insertOne(newOrder);
 
-
-        const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
-        if (product) {
-          if (product.stock <= 1) {
-            await productsCollection.updateOne(
-              { _id: new ObjectId(meta.productId) },
-              { $set: { stock: 0, status: "sold" } }
-            );
-          } else {
-            await productsCollection.updateOne(
-              { _id: new ObjectId(meta.productId) },
-              { $set: { stock: product.stock - 1 } }
-            );
-          }
+        // ৬. প্রোডাক্টের স্টক আপডেট লজিক
+        if (product.stock <= 1) {
+          await productsCollection.updateOne(
+            { _id: new ObjectId(meta.productId) },
+            { $set: { stock: 0, status: "sold" } }
+          );
+        } else {
+          await productsCollection.updateOne(
+            { _id: new ObjectId(meta.productId) },
+            { $set: { stock: product.stock - 1 } }
+          );
         }
 
-
+        // ৭. ফ্রন্টএন্ডে সম্পূর্ণ অবজেক্টটি রেসপন্স হিসেবে পাঠান
         return res.status(201).json({
           success: true,
           message: "Order placed and stock updated successfully",
@@ -243,7 +423,7 @@ async function run() {
         });
 
       } catch (error) {
-        console.error(error);
+        console.error("Order completion error:", error);
         return res.status(500).json({ message: "Failed to process order", error: error.message });
       }
     });
@@ -557,6 +737,97 @@ async function run() {
       }
     });
 
+
+
+    // admin
+    app.patch('/api/admin/users/:id/status', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { banned, action } = req.body;
+        
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) {
+          return res.status(404).send({ success: false, message: 'User not found' });
+        }
+
+        
+        let updateFields = { updatedAt: new Date() };
+
+       
+        if (banned !== undefined) {
+          updateFields.banned = banned;
+        }
+
+        
+        let messageDetail = banned ? 'User blocked' : 'User unblocked';
+
+        if (action === 'make_admin') {
+          if (user.role === 'admin') {
+            return res.status(400).send({ success: false, message: 'User is already an admin' });
+          }
+          
+          updateFields.previousRole = user.role;
+          updateFields.role = 'admin';
+          messageDetail = 'User promoted to Admin successfully';
+        }
+
+        else if (action === 'remove_admin') {
+          if (user.role !== 'admin') {
+            return res.status(400).send({ success: false, message: 'User is not an admin' });
+          }
+   
+          updateFields.role = user.previousRole || 'buyer';
+          updateFields.$unset = { previousRole: "" }; 
+          messageDetail = `Admin reverted back to ${updateFields.role} successfully`;
+        }
+
+    
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          updateFields.$unset
+            ? { $set: { banned: updateFields.banned, role: updateFields.role, updatedAt: updateFields.updatedAt }, $unset: updateFields.$unset }
+            : { $set: updateFields }
+        );
+
+        res.send({
+          success: true,
+          message: messageDetail,
+        });
+
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+
+    app.delete('/api/admin/users/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const result = await usersCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: 'User not found',
+          });
+        }
+
+        res.send({
+          success: true,
+          message: 'User account deleted successfully',
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
 
 
 
