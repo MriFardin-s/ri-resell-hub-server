@@ -17,64 +17,135 @@ let ordersCollection;
 let wishlistCollection;
 let usersCollection;
 let paymentsCollection;
-let paymentsCollect
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
+let paymentsCollect;
 
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error("Webhook signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const metadata = session.metadata;
+
+app.post('/api/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+
+    console.log("🔥 WEBHOOK HIT");
+
+    const sig = req.headers['stripe-signature'];
+
+    let event;
 
     try {
-      const paymentInfo = {
-        stripeSessionId: session.id,
-        amountPaid: session.amount_total / 100,
-        currency: session.currency,
-        paymentStatus: session.payment_status,
-        createdAt: new Date(),
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
 
-        buyer: {
-          id: metadata.buyerId,
-          name: metadata.buyerName,
-          email: metadata.buyerMail,
-          phone: metadata.buyerPhone,
-          address: metadata.buyerAddress
-        },
-        product: {
-          id: metadata.productId,
-          title: metadata.productTitle,
-          image: metadata.productImage,
-          seller: {
-            id: metadata.sellerId,
-            name: metadata.sellerName,
-            email: metadata.sellerEmail,
-            phone: metadata.sellerPhone
-          }
-        }
-      };
+      console.log("✅ EVENT =", event.type);
 
+    } catch (err) {
+      console.log("❌ WEBHOOK ERROR =", err.message);
 
-      const result = await paymentsCollection.insertOne(paymentInfo);
-      console.log("💳 Payment successfully saved to database!", result.insertedId);
-
-    } catch (dbError) {
-      console.error("Failed to save payment to database:", dbError);
-      return res.status(500).send("Database Insertion Error");
+      return res.status(400).send(
+        `Webhook Error: ${err.message}`
+      );
     }
-  }
 
-  res.send({ received: true });
-});
+    if (event.type === 'checkout.session.completed') {
+
+      const session = event.data.object;
+      const metadata = session.metadata || {};
+
+      try {
+
+        const paymentInfo = {
+          sessionId: session.id,
+          transactionId: session.payment_intent || session.id,
+          amount: session.amount_total / 100,
+          currency: session.currency,
+
+          buyerInfo: {
+            userId: metadata.buyerId || '',
+            name: metadata.buyerName || '',
+            email:
+              metadata.buyerMail ||
+              metadata.buyerEmail ||
+              session.customer_details?.email ||
+              '',
+            phone: metadata.buyerPhone || 'Not Provided',
+            address: metadata.buyerAddress || 'Not Provided'
+          },
+
+          sellerInfo: {
+            userId: metadata.sellerId || '',
+            name: metadata.sellerName || 'Unknown Seller',
+            email: metadata.sellerEmail || '',
+            phone: metadata.sellerPhone || 'Not Provided'
+          },
+
+          productId: metadata.productId || '',
+
+          productDetails: {
+            title: metadata.productTitle || '',
+            image: metadata.productImage || '',
+            price: session.amount_total / 100
+          },
+
+          paymentStatus:
+            session.payment_status === 'paid'
+              ? 'paid'
+              : session.payment_status,
+
+          orderStatus: 'processing',
+
+          createdAt: new Date()
+        };
+
+        // PAYMENT SAVE
+        await paymentsCollection.insertOne(paymentInfo);
+
+        // ORDER SAVE
+        await ordersCollection.insertOne({
+          sessionId: paymentInfo.sessionId,
+
+          buyerInfo: paymentInfo.buyerInfo,
+          sellerInfo: paymentInfo.sellerInfo,
+
+          productId: paymentInfo.productId,
+
+          productTitle: paymentInfo.productDetails.title,
+          productImage: paymentInfo.productDetails.image,
+          productPrice: paymentInfo.productDetails.price,
+
+          paymentStatus: paymentInfo.paymentStatus,
+          orderStatus: 'processing',
+
+          createdAt: new Date()
+        });
+
+        console.log("💳 Payment saved");
+        console.log("📦 Order saved");
+
+      } catch (dbError) {
+
+        console.error(
+          "Database save failed:",
+          dbError
+        );
+
+        return res.status(500).send(
+          "Database Insertion Error"
+        );
+      }
+    }
+
+    res.send({ received: true });
+  }
+);
 
 app.use(express.json());
+
+// verifyToken
+
+
+
 
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
@@ -82,6 +153,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 app.get('/', (req, res) => {
   res.send('Hello World!')
 })
+
+
 
 
 
@@ -107,14 +180,85 @@ async function run() {
     wishlistCollection = database.collection("wishlist");
     usersCollection = database.collection("user");
     paymentsCollection = database.collection("payments");
+    const sessionCollection = database.collection('session');
+
+
+
+    const verifyToken = async (req, res, next) => {
+
+      const authHeader = req.headers?.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: 'unauthorized access' })
+      }
+
+      const token = authHeader.split(' ')[1]
+
+      if (!token) {
+        return res.status(401).send({ message: 'unauthorized access' })
+      }
+
+      const query = { token: token }
+      const session = await sessionCollection.findOne(query);
+
+      if (!session) {
+        return res.status(401).send({ message: 'unauthorized access' })
+      }
+
+      const userId = session.userId;
+
+
+      const userQuery = {
+        _id: userId
+      }
+
+      const user = await usersCollection.findOne(userQuery);
+      if (!user) {
+        return res.status(401).send({ message: 'unauthorized access' })
+      }
+      // set data in the req object
+      req.user = user;
+      next();
+    }
+
+    const verifyBuyer = async (req, res, next) => {
+      if (req.user?.userRole !== 'buyer') {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      next();
+    }
+
+    // must be used after verifyToken middleware
+    const verifySeller = async (req, res, next) => {
+      if (req.user?.userRole !== 'seller') {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      next();
+    }
+
+    // must be used after verifyToken middleware
+    const verifyAdmin = async (req, res, next) => {
+      if (req.user.userRole !== 'admin') {
+        return res.status(403).send({ message: 'forbidden access' })
+      }
+      next();
+    }
+
+
 
     app.get('/api/all/products', async (req, res) => {
       try {
         const query = {};
+
         if (req.query.status) {
-          query.status = req.query.status;
+          const statusArray = req.query.status.split(',');
+          query.status = { $in: statusArray };
         }
-        const result = await productsCollection.find(query).toArray();
+
+        const result = await productsCollection
+          .find(query)
+          .sort({ _id: -1 })
+          .toArray();
+
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Failed to fetch products", error });
@@ -136,8 +280,11 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch product", error });
       }
     });
-    // seller get all products
-    app.get('/api/products', async (req, res) => {
+
+
+    // seller get all products manage products
+
+    app.get('/api/products', verifyToken,  verifySeller ,  async (req, res) => {
       const query = {};
       if (req.query.sellerId) {
         query["sellerInfo.userId"] = req.query.sellerId;
@@ -148,12 +295,156 @@ async function run() {
       }
 
 
-      const cursor = productsCollection.find(query);
+      const cursor = productsCollection.find(query).sort({ _id: -1 });;
       const result = await cursor.toArray();
       res.send(result);
     });
 
-    app.post('/api/products', async (req, res) => {
+    app.delete('/api/products/:id',verifyToken,  verifySeller ,async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const result = await productsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send({
+          success: true,
+          deletedCount: result.deletedCount,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // For Edit Find That 
+
+    app.get('/api/products/:id', verifyToken , verifySeller , async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const product = await productsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send(product);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+
+    // update
+
+    app.patch('/api/products/:id', verifyToken,  verifySeller ,async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const {
+          title,
+          description,
+          category,
+          condition,
+          price,
+          stock,
+          address,
+          phone,
+        } = req.body;
+
+        const stockAmount = Number(stock);
+        const productStatus = stockAmount > 0 ? "available" : "sold";
+        const finalStock = stockAmount > 0 ? stockAmount : 0;
+
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              title,
+              description,
+              category,
+              condition,
+              price,
+              stock: finalStock,
+              status: productStatus,
+              address,
+              phone,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+
+    app.get('/api/my-products/search/:userId', verifyToken,  verifySeller ,async (req, res) => {
+      try {
+        const { userId } = req.params;
+        const { search = '' } = req.query;
+
+        const result = await productsCollection
+          .find({
+            'sellerInfo.userId': userId,
+            title: {
+              $regex: search,
+              $options: 'i',
+            },
+          })
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+
+    app.get('/api/my-products/filter/:userId',verifyToken, verifySeller , async (req, res) => {
+      try {
+        const { userId } = req.params;
+        const { status } = req.query;
+
+        const query = {
+          'sellerInfo.userId': userId,
+        };
+
+        if (status) {
+          query.status = status;
+        }
+
+        const result = await productsCollection
+          .find(query)
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+
+    app.post('/api/products', verifyToken,  verifySeller ,async (req, res) => {
       const product = req.body;
       const newProduct = {
         ...product,
@@ -165,52 +456,50 @@ async function run() {
 
     //homepage
 
-    app.get('/api/seller/stats/:sellerId', async (req, res) => {
+    app.get('/api/seller/stats', verifyToken, verifySeller , async (req, res) => {
       try {
-        const sellerId = req.params.sellerId;
+        const { userId } = req.query;
+
+        if (!userId) {
+          return res.status(400).send({ success: false, message: "Seller User ID is required!" });
+        }
 
         const totalProducts = await productsCollection.countDocuments({
-          "sellerInfo.userId": sellerId
+          "sellerInfo.userId": userId
         });
 
         const totalSales = await ordersCollection.countDocuments({
-          "sellerInfo.userId": sellerId,
+          "sellerInfo.userId": userId,
           paymentStatus: "paid"
         });
 
         const pendingOrders = await ordersCollection.countDocuments({
-          "sellerInfo.userId": sellerId,
-          orderStatus: {
-            $in: ["pending", "processing"]
-          }
+          "sellerInfo.userId": userId,
+          orderStatus: { $in: ["pending", "processing"] }
         });
 
-        const revenueResult = await paymentsCollection.aggregate([
-          {
-            $match: {
-              "product.seller.id": sellerId,
-              paymentStatus: "paid"
-            }
-          },
-          {
-            $group: {
-              _id: null,
-              totalRevenue: {
-                $sum: "$amountPaid"
-              }
-            }
-          }
-        ]).toArray();
+        const salesOrders = await ordersCollection.find({
+          "sellerInfo.userId": userId,
+          paymentStatus: "paid"
+        }).toArray();
+
+        const totalRevenue = salesOrders.reduce((sum, order) => {
+          const price = order.productPrice || order.amount || order.productDetails?.price || 0;
+          return sum + Number(price);
+        }, 0);
 
         res.send({
+          success: true,
           totalProducts,
           totalSales,
           pendingOrders,
-          totalRevenue: revenueResult[0]?.totalRevenue || 0
+          totalRevenue
         });
 
       } catch (error) {
+        console.error("Failed to fetch seller stats:", error);
         res.status(500).send({
+          success: false,
           message: "Failed to fetch seller stats",
           error: error.message
         });
@@ -219,20 +508,38 @@ async function run() {
 
     // manage orders
 
-    app.get('/api/seller/orders/:sellerId', async (req, res) => {
-      const sellerId = req.params.sellerId;
+    app.get('/api/seller/orders/:sellerId', verifySeller , verifyToken , async (req, res) => {
+      try {
+        const sellerId = req.params.sellerId;
 
-      const orders = await ordersCollection
-        .find({
-          'sellerInfo.userId': sellerId,
-        })
-        .sort({ createdAt: -1 })
-        .toArray();
+        if (!sellerId) {
+          return res.status(400).send({ success: false, message: "Seller ID is required!" });
+        }
 
-      res.send(orders);
+        const rawOrders = await ordersCollection
+          .find({
+            'sellerInfo.userId': sellerId,
+          })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        const orders = rawOrders.map(order => {
+          return {
+            ...order,
+            price: order.productPrice || order.amount || order.productDetails?.price || 0,
+            productTitle: order.productTitle || order.productDetails?.title || order.productName || "Premium Product"
+          };
+        });
+
+        res.send(orders);
+
+      } catch (error) {
+        console.error("Error fetching seller orders:", error);
+        res.status(500).send({ success: false, message: "Internal server error" });
+      }
     });
 
-    app.patch('/api/orders/:id/status', async (req, res) => {
+    app.patch('/api/orders/:id/status', verifyToken, verifySeller , async (req, res) => {
       const { status } = req.body;
 
       const result = await ordersCollection.updateOne(
@@ -251,74 +558,159 @@ async function run() {
       });
     });
 
-    app.get('/api/seller/analytics/:sellerId', async (req, res) => {
+    app.get('/api/seller/analytics/:sellerId', verifyToken, verifySeller , async (req, res) => {
       try {
         const sellerId = req.params.sellerId;
 
         const monthlySales = await paymentsCollection.aggregate([
           {
             $match: {
-              "product.seller.id": sellerId,
-              paymentStatus: "paid"
+              $and: [
+                {
+                  $or: [
+                    { "sellerInfo.userId": sellerId },
+                    { "product.seller.id": sellerId },
+                    { "sellerId": sellerId }
+                  ]
+                },
+                {
+                  $or: [
+                    { paymentStatus: "paid" },
+                    { paymentStatus: "Paid" }
+                  ]
+                }
+              ]
             }
           },
           {
             $group: {
               _id: {
                 month: {
-                  $month: "$createdAt"
+                  $month: {
+                    $ifNull: ["$createdAt", new Date()]
+                  }
                 }
               },
               totalRevenue: {
-                $sum: "$amountPaid"
+                $sum: {
+                  $ifNull: [
+                    "$amountPaid",
+                    {
+                      $ifNull: [
+                        "$amount",
+                        {
+                          $ifNull: [
+                            "$price",
+                            {
+                              $ifNull: [
+                                "$productPrice",
+                                {
+                                  $ifNull: [
+                                    "$productDetails.price",
+                                    {
+                                      $ifNull: [
+                                        "$product.price",
+                                        { $ifNull: ["$productDetails.amount", 0] }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
-              totalSales: {
-                $sum: 1
-              }
+              totalSales: { $sum: 1 }
             }
           },
           {
-            $sort: {
-              "_id.month": 1
-            }
+            $sort: { "_id.month": 1 }
           }
         ]).toArray();
 
         res.send(monthlySales);
       } catch (error) {
-        res.status(500).send(error);
+        console.error("Analytics Error:", error);
+        res.status(500).send({ success: false, message: error.message });
       }
     });
 
-    app.get('/api/seller/top-products/:sellerId', async (req, res) => {
+    app.get('/api/seller/top-products/:sellerId', verifyToken, verifySeller , async (req, res) => {
       try {
         const sellerId = req.params.sellerId;
 
         const products = await paymentsCollection.aggregate([
           {
             $match: {
-              "product.seller.id": sellerId,
-              paymentStatus: "paid"
+              $and: [
+                {
+                  $or: [
+                    { "sellerInfo.userId": sellerId },
+                    { "product.seller.id": sellerId },
+                    { "sellerId": sellerId }
+                  ]
+                },
+                {
+                  $or: [
+                    { paymentStatus: "paid" },
+                    { paymentStatus: "Paid" }
+                  ]
+                }
+              ]
             }
           },
           {
             $group: {
-              _id: "$product.id",
+              _id: {
+                $ifNull: ["$product.id", { $ifNull: ["$productId", "$_id"] }]
+              },
               title: {
-                $first: "$product.title"
+                $first: {
+                  $ifNull: ["$product.title", { $ifNull: ["$productTitle", { $ifNull: ["$productDetails.title", "Premium Product"] }] }]
+                }
               },
-              sales: {
-                $sum: 1
-              },
+              sales: { $sum: 1 },
               revenue: {
-                $sum: "$amountPaid"
+                $sum: {
+                  $ifNull: [
+                    "$amountPaid",
+                    {
+                      $ifNull: [
+                        "$amount",
+                        {
+                          $ifNull: [
+                            "$price",
+                            {
+                              $ifNull: [
+                                "$productPrice",
+                                {
+                                  $ifNull: [
+                                    "$productDetails.price",
+                                    {
+                                      $ifNull: [
+                                        "$product.price",
+                                        { $ifNull: ["$productDetails.amount", 0] }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             }
           },
           {
-            $sort: {
-              sales: -1
-            }
+            $sort: { sales: -1 }
           },
           {
             $limit: 5
@@ -327,18 +719,19 @@ async function run() {
 
         res.send(products);
       } catch (error) {
-        res.status(500).send(error);
+        console.error("Top Products Error:", error);
+        res.status(500).send({ success: false, message: error.message });
       }
     });
 
 
 
     // buyer 
-    app.post('/api/orders', async (req, res) => {
+    app.post('/api/orders', verifyToken,  verifyBuyer, async (req, res) => {
       const { sessionId } = req.body;
 
       try {
-        // ১. চেক করুন অর্ডারটি আগেই প্রসেস করা হয়েছে কি না
+
         const existingOrder = await ordersCollection.findOne({ sessionId });
         if (existingOrder) {
           return res.status(200).json({
@@ -348,7 +741,7 @@ async function run() {
           });
         }
 
-        // ২. স্ট্রাইপ সেশন থেকে ডাটা রিট্রিভ করুন
+
         const session = await stripe.checkout.sessions.retrieve(sessionId);
         const meta = session.metadata;
 
@@ -356,7 +749,6 @@ async function run() {
           return res.status(400).json({ message: "Payment not verified or completed" });
         }
 
-        // ৩. ডাটাবেজ থেকে প্রোডাক্টের কারেন্ট ইনফো (দাম এবং নাম) নিয়ে আসুন
         const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
         if (!product) {
           return res.status(404).json({ message: "Product not found in database" });
@@ -377,16 +769,16 @@ async function run() {
           phone: meta.sellerPhone
         };
 
-        // ৪. নতুন অর্ডার অবজেক্টে ফ্রন্টএন্ডের প্রয়োজনীয় সব ফিল্ড যোগ করুন
+
         const newOrder = {
           sessionId,
-          transactionId: session.payment_intent, // 🎯 স্ট্রাইপের ট্রানজেকশন আইডি (Payment Intent ID)
-          amount: session.amount_total / 100,     // 🎯 ফ্রন্টএন্ডের orderData?.amount এর জন্য সঠিক ফরম্যাট
+          transactionId: session.payment_intent,
+          amount: session.amount_total / 100,
           currency: session.currency,
           buyerInfo,
           sellerInfo,
           productId: meta.productId,
-          productDetails: {                       // 🎯 Order Summary দেখানোর জন্য প্রোডাক্ট ডিটেইলস
+          productDetails: {
             title: product.title,
             image: product.image || product.images?.[0] || "",
             price: product.price
@@ -396,10 +788,10 @@ async function run() {
           createdAt: new Date()
         };
 
-        // ৫. অর্ডার ডাটাবেজে ইনসার্ট করুন
+
         const orderResult = await ordersCollection.insertOne(newOrder);
 
-        // ৬. প্রোডাক্টের স্টক আপডেট লজিক
+
         if (product.stock <= 1) {
           await productsCollection.updateOne(
             { _id: new ObjectId(meta.productId) },
@@ -412,7 +804,7 @@ async function run() {
           );
         }
 
-        // ৭. ফ্রন্টএন্ডে সম্পূর্ণ অবজেক্টটি রেসপন্স হিসেবে পাঠান
+
         return res.status(201).json({
           success: true,
           message: "Order placed and stock updated successfully",
@@ -429,8 +821,70 @@ async function run() {
     });
 
 
+    // success page 
+    app.get('/api/orders', verifyToken, verifyBuyer, async (req, res) => {
+      try {
+        let { session_id } = req.query;
 
-    app.get('/api/buyer/my-orders/:email', async (req, res) => {
+        if (!session_id) {
+          return res.status(400).send({
+            success: false,
+            message: 'Session ID is required'
+          });
+        }
+
+        // console.log("📥 ORIGINAL FROM FRONTEND =", session_id);
+
+
+        // console.log(
+        //   "TOTAL PAYMENTS =",
+        //   await paymentsCollection.countDocuments()
+        // );
+
+        const latest = await paymentsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .toArray();
+
+        // console.log(
+        //   "LATEST PAYMENTS =",
+        //   latest.map(p => p.sessionId)
+        // );
+
+        const order = await paymentsCollection.findOne({
+          sessionId: session_id
+        });
+
+        if (!order) {
+          // console.log("❌ NO ORDER FOUND FOR ID:", session_id);
+
+          return res.status(404).send({
+            success: false,
+            message: 'Order not found.'
+          });
+        }
+
+        // console.log("✅ ORDER FOUND SUCCESSFULLY!");
+
+        res.send({
+          success: true,
+          order
+        });
+
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          success: false,
+          message: "Internal server error."
+        });
+      }
+    });
+
+
+
+    app.get('/api/buyer/my-orders/:email', verifyToken, verifyBuyer,async (req, res) => {
       try {
         const email = req.params.email;
 
@@ -462,7 +916,7 @@ async function run() {
     });
 
 
-    app.patch('/api/orders/:id/cancel', async (req, res) => {
+    app.patch('/api/orders/:id/cancel', verifyToken ,  verifyBuyer,async (req, res) => {
       try {
         const orderId = req.params.id;
         const query = { _id: new ObjectId(orderId) };
@@ -502,10 +956,10 @@ async function run() {
     // Wishlist
 
 
-    app.patch('/api/wishlist/status', async (req, res) => {
+    app.patch('/api/wishlist/status', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { userId, productId } = req.query;
-        console.log("Checking Wishlist Data:", { userId, productId });
+        // console.log("Checking Wishlist Data:", { userId, productId });
         const query = { userId, productId };
 
         const existing = await wishlistCollection.findOne(query);
@@ -529,7 +983,7 @@ async function run() {
     });
 
 
-    app.get('/api/wishlist/remove', async (req, res) => {
+    app.get('/api/wishlist/remove', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { userId, productId } = req.query;
         await wishlistCollection.deleteOne({ userId, productId });
@@ -540,7 +994,7 @@ async function run() {
     });
 
 
-    app.get('/api/wishlist/status', async (req, res) => {
+    app.get('/api/wishlist/status', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { userId, productId } = req.query;
         const item = await wishlistCollection.findOne({ userId, productId });
@@ -550,7 +1004,7 @@ async function run() {
       }
     });
 
-    app.get('/api/wishlist/user/:email', async (req, res) => {
+    app.get('/api/wishlist/user/:email', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const email = req.params.email;
 
@@ -586,7 +1040,7 @@ async function run() {
     });
 
 
-    app.get('/api/buyer/dashboard-summary', async (req, res) => {
+    app.get('/api/buyer/dashboard-summary', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { email } = req.query;
 
@@ -594,28 +1048,23 @@ async function run() {
           return res.status(400).send({ success: false, message: "Email parameter is required!" });
         }
 
-
         const user = await usersCollection.findOne({ email });
         if (!user) {
           return res.status(404).send({ success: false, message: "User not found!" });
         }
 
-
         const totalOrders = await ordersCollection.countDocuments({
           "buyerInfo.email": email
         });
-
 
         const wishlistCount = await wishlistCollection.countDocuments({
           userId: user._id.toString()
         });
 
-
         const recentOrdersRaw = await ordersCollection.find({ "buyerInfo.email": email })
-          .sort({ date: -1 })
+          .sort({ createdAt: -1 })
           .limit(5)
           .toArray();
-
 
         const recentPurchases = await Promise.all(
           recentOrdersRaw.map(async (order) => {
@@ -633,12 +1082,11 @@ async function run() {
               _id: order._id,
               productName: order.productTitle || order.productName || order.title || productInfo?.title || "Product Unavailable",
               price: order.productPrice || order.price || order.totalPrice || productInfo?.price || 0,
-              date: order.date || order.createdAt || new Date(),
+              date: order.createdAt || order.date || new Date(),
               orderStatus: order.orderStatus || 'pending'
             };
           })
         );
-
 
         res.send({
           success: true,
@@ -655,7 +1103,7 @@ async function run() {
 
 
 
-    app.patch('/api/users/update-profile', async (req, res) => {
+    app.patch('/api/users/update-profile', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { email, name, phone, address, image } = req.body;
 
@@ -688,7 +1136,7 @@ async function run() {
       }
     });
 
-    app.patch('/api/users/change-password', async (req, res) => {
+    app.patch('/api/users/change-password', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { email, currentPassword, newPassword } = req.body;
 
@@ -721,51 +1169,58 @@ async function run() {
 
 
 
-    app.get('/api/payments/buyer/:email', async (req, res) => {
+    app.get('/api/payments/buyer/:email', verifyToken, verifyBuyer, async (req, res) => {
       try {
         const { email } = req.params;
 
+        // console.log("EMAIL =", email);
+
         const payments = await paymentsCollection
-          .find({ "buyer.email": email })
-          .sort({ createdAt: -1 })
+          .find({
+            "buyerInfo.email": email,
+          })
           .toArray();
 
-        res.send({ success: true, data: payments });
+        // console.log("COUNT =", payments.length);
+        // console.log("PAYMENTS =", payments);
+
+        res.send({
+          success: true,
+          data: payments,
+        });
       } catch (error) {
-        console.error("Fetch payment history error:", error);
-        res.status(500).send({ success: false, message: "Internal server error." });
+        console.log(error);
       }
     });
 
 
-
     // admin
-    app.patch('/api/admin/users/:id/status', async (req, res) => {
+    app.patch('/api/admin/users/:id/status',  verifyToken,  verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const { banned, action } = req.body;
-        
+
         const user = await usersCollection.findOne({ _id: new ObjectId(id) });
         if (!user) {
           return res.status(404).send({ success: false, message: 'User not found' });
         }
 
-        
+
         let updateFields = { updatedAt: new Date() };
 
-       
+
         if (banned !== undefined) {
           updateFields.banned = banned;
         }
 
-        
+
         let messageDetail = banned ? 'User blocked' : 'User unblocked';
 
         if (action === 'make_admin') {
           if (user.role === 'admin') {
             return res.status(400).send({ success: false, message: 'User is already an admin' });
           }
-          
+
           updateFields.previousRole = user.role;
           updateFields.role = 'admin';
           messageDetail = 'User promoted to Admin successfully';
@@ -775,13 +1230,13 @@ async function run() {
           if (user.role !== 'admin') {
             return res.status(400).send({ success: false, message: 'User is not an admin' });
           }
-   
+
           updateFields.role = user.previousRole || 'buyer';
-          updateFields.$unset = { previousRole: "" }; 
+          updateFields.$unset = { previousRole: "" };
           messageDetail = `Admin reverted back to ${updateFields.role} successfully`;
         }
 
-    
+
         const result = await usersCollection.updateOne(
           { _id: new ObjectId(id) },
           updateFields.$unset
@@ -801,7 +1256,7 @@ async function run() {
     });
 
 
-    app.delete('/api/admin/users/:id', async (req, res) => {
+    app.delete('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -829,6 +1284,367 @@ async function run() {
       }
     });
 
+    // admin manage product 
+
+    app.get('/api/all/products', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const query = {};
+
+        if (req.query.status) {
+          query.status = req.query.status;
+        }
+
+        const result = await productsCollection
+          .find(query)
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch products",
+          error
+        });
+      }
+    });
+
+    app.patch('/api/admin/products/:id/status', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { action } = req.body;
+
+        let status;
+
+        if (action === 'approve') {
+          status = 'available';
+        } else if (action === 'reject') {
+          status = 'rejected';
+        } else {
+          return res.status(400).send({
+            success: false,
+            message: 'Invalid action',
+          });
+        }
+
+        const result = await productsCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              status,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: 'Product not found',
+          });
+        }
+
+        res.send({
+          success: true,
+          message:
+            action === 'approve'
+              ? 'Product approved successfully'
+              : 'Product rejected successfully',
+        });
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    app.delete('/api/admin/products/:id', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({
+            success: false,
+            message: 'Invalid product id',
+          });
+        }
+
+        const product = await productsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!product) {
+          return res.status(404).send({
+            success: false,
+            message: 'Product not found',
+          });
+        }
+
+        const result = await productsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send({
+          success: true,
+          message: 'Product deleted successfully',
+          deletedProduct: {
+            id: product._id,
+            title: product.title,
+          },
+        });
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    // admin manage order
+
+    app.get('/api/admin/orders',  verifyToken, verifyAdmin,async (req, res) => {
+      try {
+        const result = await ordersCollection
+          .aggregate([
+            {
+              $lookup: {
+                from: 'products',
+                let: {
+                  productObjectId: {
+                    $toObjectId: '$productId',
+                  },
+                },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $eq: ['$_id', '$$productObjectId'],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      title: 1,
+                      price: 1,
+                      images: 1,
+                      category: 1,
+                      status: 1,
+                    },
+                  },
+                ],
+                as: 'productDetails',
+              },
+            },
+            {
+              $unwind: {
+                path: '$productDetails',
+                preserveNullAndEmptyArrays: true,
+              },
+            },
+            {
+              $sort: {
+                createdAt: -1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    app.patch('/api/admin/orders/:id/status', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        const result = await ordersCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+          },
+          {
+            $set: {
+              orderStatus: status,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: 'Order not found',
+          });
+        }
+
+        res.send({
+          success: true,
+          message: 'Order status updated successfully',
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    //  analytics
+
+    app.get('/api/admin/analytics', verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        
+        const totalUsers = await usersCollection.countDocuments();
+        const totalProducts = await productsCollection.countDocuments();
+        const totalOrders = await paymentsCollection.countDocuments({
+          $or: [{ paymentStatus: "paid" }, { paymentStatus: "Paid" }]
+        });
+        const totalWishlist = await wishlistCollection.countDocuments();
+
+       
+        const revenueStats = await paymentsCollection.aggregate([
+          {
+            $match: {
+              $or: [
+                { paymentStatus: "paid" },
+                { paymentStatus: "Paid" }
+              ]
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              total: {
+                $sum: {
+                  $toDouble: {
+                    $ifNull: [
+                      "$amountPaid",
+                      {
+                        $ifNull: [
+                          "$amount",
+                          {
+                            $ifNull: [
+                              "$price",
+                              {
+                                $ifNull: [
+                                  "$buyerInfo.amount", 
+                                  {
+                                    $ifNull: [
+                                      "$product.price",
+                                      { $ifNull: ["$productDetails.price", 0] }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]).toArray();
+
+        const totalRevenue = revenueStats.length > 0 ? revenueStats[0].total : 0;
+
+        const monthlyOrders = await paymentsCollection.aggregate([
+          {
+            $match: {
+              $or: [{ paymentStatus: "paid" }, { paymentStatus: "Paid" }]
+            }
+          },
+          {
+            $group: {
+              _id: { month: { $month: { $ifNull: ["$createdAt", new Date()] } } },
+              totalSales: { $sum: 1 }
+            }
+          },
+          { $sort: { "_id.month": 1 } }
+        ]).toArray();
+
+     
+        const userGrowth = await usersCollection.aggregate([
+          {
+            $group: {
+              _id: { month: { $month: { $ifNull: ["$createdAt", new Date()] } } },
+              count: { $sum: 1 }
+            }
+          },
+          { $sort: { "_id.month": 1 } }
+        ]).toArray();
+
+        const categoryPerformance = await productsCollection.aggregate([
+          {
+            $group: {
+              _id: "$category",
+              products: { $sum: 1 }
+            }
+          }
+        ]).toArray();
+
+     
+        res.send({
+          overview: {
+            totalUsers,
+            totalProducts,
+            totalOrders,
+            totalRevenue,
+            totalWishlist
+          },
+          userGrowth,
+          monthlyOrders,
+          categoryPerformance
+        });
+
+      } catch (error) {
+        console.error("Admin Analytics Error:", error);
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // admin stats
+
+    app.get('/api/admin/dashboard-stats',  verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const totalUsers =
+          await usersCollection.countDocuments();
+
+        const totalProducts =
+          await productsCollection.countDocuments();
+
+        const totalOrders =
+          await ordersCollection.countDocuments();
+
+        res.send({
+          totalUsers,
+          totalProducts,
+          totalOrders,
+        });
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
 
 
     // Send a ping to confirm a successful connection
