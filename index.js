@@ -12,134 +12,14 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
 
 app.use(cors())
 
-let database;
-let productsCollection;
-let ordersCollection;
-let wishlistCollection;
-let usersCollection;
-let paymentsCollection;
-let paymentsCollect;
+// let database;
+// let productsCollection;
+// let ordersCollection;
+// let wishlistCollection;
+// let usersCollection;
+// let paymentsCollection;
+// let paymentsCollect;
 
-
-
-app.post('/api/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-
-    // console.log("🔥 WEBHOOK  HIT");
-
-    const sig = req.headers['stripe-signature'];
-
-    let event;
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-
-      // console.log("✅ EVENT =", event.type);
-
-    } catch (err) {
-      console.log("❌ WEBHOOK ERROR =", err.message);
-
-      return res.status(400).send(
-        `Webhook Error: ${err.message}`
-      );
-    }
-
-    if (event.type === 'checkout.session.completed') {
-
-      const session = event.data.object;
-      const metadata = session.metadata || {};
-
-      try {
-
-        const paymentInfo = {
-          sessionId: session.id,
-          transactionId: session.payment_intent || session.id,
-          amount: session.amount_total / 100,
-          currency: session.currency,
-
-          buyerInfo: {
-            userId: metadata.buyerId || '',
-            name: metadata.buyerName || '',
-            email:
-              metadata.buyerMail ||
-              metadata.buyerEmail ||
-              session.customer_details?.email ||
-              '',
-            phone: metadata.buyerPhone || 'Not Provided',
-            address: metadata.buyerAddress || 'Not Provided'
-          },
-
-          sellerInfo: {
-            userId: metadata.sellerId || '',
-            name: metadata.sellerName || 'Unknown Seller',
-            email: metadata.sellerEmail || '',
-            phone: metadata.sellerPhone || 'Not Provided'
-          },
-
-          productId: metadata.productId || '',
-
-          productDetails: {
-            title: metadata.productTitle || '',
-            image: metadata.productImage || '',
-            price: session.amount_total / 100
-          },
-
-          paymentStatus:
-            session.payment_status === 'paid'
-              ? 'paid'
-              : session.payment_status,
-
-          orderStatus: 'processing',
-
-          createdAt: new Date()
-        };
-
-        // PAYMENT SAVE
-        await paymentsCollection.insertOne(paymentInfo);
-
-        // ORDER SAVE
-        await ordersCollection.insertOne({
-          sessionId: paymentInfo.sessionId,
-
-          buyerInfo: paymentInfo.buyerInfo,
-          sellerInfo: paymentInfo.sellerInfo,
-
-          productId: paymentInfo.productId,
-
-          productTitle: paymentInfo.productDetails.title,
-          productImage: paymentInfo.productDetails.image,
-          productPrice: paymentInfo.productDetails.price,
-
-          paymentStatus: paymentInfo.paymentStatus,
-          orderStatus: 'processing',
-
-          createdAt: new Date()
-        });
-
-        // console.log("💳 Payment saved");
-        // console.log("📦 Order saved");
-
-      } catch (dbError) {
-
-        console.error(
-          "Database save failed:",
-          dbError
-        );
-
-        return res.status(500).send(
-          "Database Insertion Error"
-        );
-      }
-    }
-
-    res.send({ received: true });
-  }
-);
 
 app.use(express.json());
 
@@ -180,12 +60,12 @@ client.connect(() => {
 //     // Connect the client to the server	(optional starting in v4.7)
 
 //     await client.connect();
-database = client.db("ri-resell-hub-client");
-productsCollection = database.collection("products");
-ordersCollection = database.collection("orders");
-wishlistCollection = database.collection("wishlist");
-usersCollection = database.collection("user");
-paymentsCollection = database.collection("payments");
+const database = client.db("ri-resell-hub-client");
+const productsCollection = database.collection("products");
+const ordersCollection = database.collection("orders");
+const wishlistCollection = database.collection("wishlist");
+const usersCollection = database.collection("user");
+const paymentsCollection = database.collection("payments");
 const sessionCollection = database.collection('session');
 
 
@@ -344,8 +224,8 @@ app.get("/api/featured-products", async (req, res) => {
       .find({
         status: "available",
       })
-      .sort({ createdAt: -1 }) 
-      .limit(6)                
+      .sort({ createdAt: -1 })
+      .limit(6)
       .toArray();
 
     res.send(products);
@@ -461,11 +341,9 @@ app.get('/api/products/:id', async (req, res) => {
 
 // update
 
-app.patch('/api/products/:id', async (req, res) => {
-
+app.patch("/api/products/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    //  console.log("Request Body:", req.body);
 
     const {
       title,
@@ -479,8 +357,11 @@ app.patch('/api/products/:id', async (req, res) => {
     } = req.body;
 
     const stockAmount = Number(stock);
-    const productStatus = stockAmount > 0 ? "available" : "sold";
-    const finalStock = stockAmount > 0 ? stockAmount : 0;
+    const finalStock = Math.max(stockAmount, 0);
+
+
+    const productStatus =
+      finalStock > 0 ? "pending" : "sold";
 
     const result = await productsCollection.updateOne(
       { _id: new ObjectId(id) },
@@ -490,7 +371,7 @@ app.patch('/api/products/:id', async (req, res) => {
           description,
           category,
           condition,
-          price,
+          price: Number(price),
           stock: finalStock,
           status: productStatus,
           address,
@@ -500,20 +381,27 @@ app.patch('/api/products/:id', async (req, res) => {
       }
     );
 
-    //  console.log("Updated Product:", result);
+    if (!result.matchedCount) {
+      return res.status(404).send({
+        success: false,
+        message: "Product not found",
+      });
+    }
 
     res.send({
       success: true,
+      message: "Product updated successfully",
       modifiedCount: result.modifiedCount,
     });
   } catch (error) {
+    console.error(error);
+
     res.status(500).send({
       success: false,
       message: error.message,
     });
   }
 });
-
 
 app.get('/api/my-products/search/:userId', verifyToken, verifySeller, async (req, res) => {
   try {
@@ -567,14 +455,37 @@ app.get('/api/my-products/filter/:userId', verifyToken, verifySeller, async (req
 });
 
 
-app.post('/api/products', async (req, res) => {
-  const product = req.body;
-  const newProduct = {
-    ...product,
-    createdAt: new Date()
+app.post("/api/products", async (req, res) => {
+
+  try {
+    const product = req.body;
+
+    const stock = Number(product.stock);
+
+    const newProduct = {
+      ...product,
+      stock: Math.max(stock, 0),
+
+
+      status: stock > 0 ? "pending" : "sold",
+
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+
+    const result = await productsCollection.insertOne(newProduct);
+
+    res.send({
+      success: true,
+      insertedId: result.insertedId,
+    });
+  } catch (err) {
+    res.status(500).send({
+      success: false,
+      message: err.message,
+    });
   }
-  const result = await productsCollection.insertOne(newProduct);
-  res.send(result);
 });
 
 //homepage
@@ -709,71 +620,31 @@ app.get('/api/seller/analytics/:sellerId', async (req, res) => {
 
     const monthlySales = await paymentsCollection.aggregate([
       {
+        
         $match: {
-          $and: [
-            {
-              $or: [
-                { "sellerInfo.userId": sellerId },
-                { "product.seller.id": sellerId },
-                { "sellerId": sellerId }
-              ]
-            },
-            {
-              $or: [
-                { paymentStatus: "paid" },
-                { paymentStatus: "Paid" }
-              ]
-            }
-          ]
+          "sellerInfo.userId": sellerId,
+          paymentStatus: "paid"
         }
       },
       {
+        
         $group: {
-          _id: {
-            month: {
-              $month: {
-                $ifNull: ["$createdAt", new Date()]
-              }
-            }
-          },
-          totalRevenue: {
-            $sum: {
-              $ifNull: [
-                "$amountPaid",
-                {
-                  $ifNull: [
-                    "$amount",
-                    {
-                      $ifNull: [
-                        "$price",
-                        {
-                          $ifNull: [
-                            "$productPrice",
-                            {
-                              $ifNull: [
-                                "$productDetails.price",
-                                {
-                                  $ifNull: [
-                                    "$product.price",
-                                    { $ifNull: ["$productDetails.amount", 0] }
-                                  ]
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          },
+          _id: { $month: "$createdAt" },
+          totalRevenue: { $sum: { $ifNull: ["$amount", { $ifNull: ["$productDetails.price", 0] }] } },
           totalSales: { $sum: 1 }
         }
       },
       {
-        $sort: { "_id.month": 1 }
+        
+        $project: {
+          _id: 0,
+          month: "$_id",
+          totalRevenue: 1,
+          totalSales: 1
+        }
+      },
+      {
+        $sort: { "month": 1 }
       }
     ]).toArray();
 
@@ -790,68 +661,29 @@ app.get('/api/seller/top-products/:sellerId', async (req, res) => {
 
     const products = await paymentsCollection.aggregate([
       {
+        
         $match: {
-          $and: [
-            {
-              $or: [
-                { "sellerInfo.userId": sellerId },
-                { "product.seller.id": sellerId },
-                { "sellerId": sellerId }
-              ]
-            },
-            {
-              $or: [
-                { paymentStatus: "paid" },
-                { paymentStatus: "Paid" }
-              ]
-            }
-          ]
+          "sellerInfo.userId": sellerId,
+          paymentStatus: "paid"
         }
       },
       {
+        
         $group: {
-          _id: {
-            $ifNull: ["$product.id", { $ifNull: ["$productId", "$_id"] }]
-          },
-          title: {
-            $first: {
-              $ifNull: ["$product.title", { $ifNull: ["$productTitle", { $ifNull: ["$productDetails.title", "Premium Product"] }] }]
-            }
-          },
+          _id: "$productId",
+          title: { $first: { $ifNull: ["$productDetails.title", "Premium Product"] } },
           sales: { $sum: 1 },
-          revenue: {
-            $sum: {
-              $ifNull: [
-                "$amountPaid",
-                {
-                  $ifNull: [
-                    "$amount",
-                    {
-                      $ifNull: [
-                        "$price",
-                        {
-                          $ifNull: [
-                            "$productPrice",
-                            {
-                              $ifNull: [
-                                "$productDetails.price",
-                                {
-                                  $ifNull: [
-                                    "$product.price",
-                                    { $ifNull: ["$productDetails.amount", 0] }
-                                  ]
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          }
+          revenue: { $sum: { $ifNull: ["$amount", { $ifNull: ["$productDetails.price", 0] }] } }
+        }
+      },
+      {
+        
+        $project: {
+          _id: 0,
+          id: "$_id",
+          title: 1,
+          sales: 1,
+          revenue: 1
         }
       },
       {
@@ -870,98 +702,141 @@ app.get('/api/seller/top-products/:sellerId', async (req, res) => {
 });
 
 
-
 // buyer 
-app.post('/api/orders', async (req, res) => {
-  const { sessionId } = req.body;
 
+
+app.post("/api/orders", async (req, res) => {
   try {
+    const { sessionId } = req.body;
 
-    const existingOrder = await ordersCollection.findOne({ sessionId });
-    if (existingOrder) {
-      return res.status(200).json({
-        success: true,
-        message: "Order already processed",
-        order: existingOrder
+    if (!sessionId) {
+      return res.status(400).send({
+        success: false,
+        message: "Session ID is required",
       });
     }
 
+    // Stripe Session
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ["payment_intent"],
+    });
 
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    const meta = session.metadata;
-
-    if (!session || session.payment_status !== 'paid') {
-      return res.status(400).json({ message: "Payment not verified or completed" });
+    if (session.payment_status !== "paid") {
+      return res.status(400).send({
+        success: false,
+        message: "Payment not completed",
+      });
     }
 
-    const product = await productsCollection.findOne({ _id: new ObjectId(meta.productId) });
-    if (!product) {
-      return res.status(404).json({ message: "Product not found in database" });
-    }
-
-    const buyerInfo = {
-      userId: meta.buyerId,
-      name: meta.buyerName,
-      email: meta.buyerMail,
-      phone: meta.buyerPhone,
-      address: meta.buyerAddress
-    };
-
-    const sellerInfo = {
-      userId: meta.sellerId,
-      name: meta.sellerName,
-      email: meta.sellerEmail,
-      phone: meta.sellerPhone
-    };
-
-
-    const newOrder = {
+    // Duplicate check
+    const alreadyExists = await ordersCollection.findOne({
       sessionId,
-      transactionId: session.payment_intent,
+    });
+
+    if (alreadyExists) {
+      return res.send({
+        success: true,
+        message: "Order already exists",
+      });
+    }
+
+    const metadata = session.metadata;
+
+    // Product
+    const product = await productsCollection.findOne({
+      _id: new ObjectId(metadata.productId),
+    });
+
+    if (!product) {
+      return res.status(404).send({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    //-----------------------------------
+    // Order document
+    //-----------------------------------
+
+    const order = {
+      sessionId,
+
+      transactionId: session.payment_intent.id,
+
       amount: session.amount_total / 100,
+
       currency: session.currency,
-      buyerInfo,
-      sellerInfo,
-      productId: meta.productId,
+
+      paymentStatus: session.payment_status,
+
+      orderStatus: "processing",
+
+      buyerInfo: {
+        id: metadata.buyerId,
+        name: metadata.buyerName,
+        email: metadata.buyerEmail,
+        phone: metadata.buyerPhone,
+        address: metadata.buyerAddress,
+      },
+
+      sellerInfo: product.sellerInfo,
+
+      productId: metadata.productId,
+
       productDetails: {
         title: product.title,
-        image: product.image || product.images?.[0] || "",
-        price: product.price
+        image: product.images?.[0],
+        price: product.price,
       },
-      paymentStatus: session.payment_status,
-      orderStatus: "processing",
-      createdAt: new Date()
+
+      createdAt: new Date(),
     };
 
+    //-----------------------------------
+    // Save order
+    //-----------------------------------
 
-    const orderResult = await ordersCollection.insertOne(newOrder);
+    await ordersCollection.insertOne(order);
 
+    //-----------------------------------
+    // Save payment history
+    //-----------------------------------
 
-    if (product.stock <= 1) {
-      await productsCollection.updateOne(
-        { _id: new ObjectId(meta.productId) },
-        { $set: { stock: 0, status: "sold" } }
-      );
-    } else {
-      await productsCollection.updateOne(
-        { _id: new ObjectId(meta.productId) },
-        { $set: { stock: product.stock - 1 } }
-      );
-    }
+    await paymentsCollection.insertOne({
+      ...order,
+    });
 
+    //-----------------------------------
+    // Update product
+    //-----------------------------------
 
-    return res.status(201).json({
-      success: true,
-      message: "Order placed and stock updated successfully",
-      order: {
-        _id: orderResult.insertedId,
-        ...newOrder
+    const newStock = Math.max((product.stock || 0) - 1, 0);
+
+    await productsCollection.updateOne(
+      {
+        _id: product._id,
+      },
+      {
+        $set: {
+          stock: newStock,
+          status: newStock === 0 ? "sold" : "available",
+          updatedAt: new Date(),
+        },
       }
+    );
+
+    res.send({
+      success: true,
+      message: "Order created successfully",
     });
 
   } catch (error) {
-    console.error("Order completion error:", error);
-    return res.status(500).json({ message: "Failed to process order", error: error.message });
+    console.error(error);
+
+    res.status(500).send({
+      success: false,
+      message: error.message,
+    });
   }
 });
 
@@ -1027,63 +902,76 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-
-
 app.get('/api/buyer/my-orders/:email', verifyToken, verifyBuyer, async (req, res) => {
   try {
     const email = req.params.email;
 
-    const orders = await ordersCollection
-      .find({ "buyerInfo.email": email })
-      .sort({ createdAt: -1 }) // newest order first
-      .toArray();
+    if (email !== req.user?.email) {
+      return res.status(403).send({ success: false, message: "Forbidden Access" });
+    }
 
-    const ordersWithProductDetails = await Promise.all(
-      orders.map(async (order) => {
-        let productInfo = null;
-
-        try {
-          productInfo = await productsCollection.findOne({
-            _id: new ObjectId(order.productId)
-          });
-        } catch (err) {
-          console.log("Product lookup failed:", err.message);
+    const ordersWithDetails = await ordersCollection.aggregate([
+      { $match: { "buyerInfo.email": email } },
+      { $sort: { createdAt: -1 } },
+      {
+        $addFields: {
+          convertedProductId: {
+            $cond: {
+              if: { $eq: [{ $type: "$productId" }, "string"] },
+              then: { $toObjectId: "$productId" },
+              else: "$productId"
+            }
+          }
         }
+      },
+      {
+        $lookup: {
+          from: "products",
+          localField: "convertedProductId",
+          foreignField: "_id",
+          as: "dbProduct"
+        }
+      },
+      {
+        $unwind: {
+          path: "$dbProduct",
+          preserveNullAndEmptyArrays: true
+        }
+      }
+    ]).toArray();
 
-        return {
-          ...order,
-          productTitle:
-            order.productTitle ||
-            productInfo?.title ||
-            "Product Unavailable",
+    const finalOrders = ordersWithDetails.map(order => {
+      const productInfo = order.dbProduct;
+      const savedDetails = order.productDetails || {};
 
-          productImage:
-            order.productImage ||
-            productInfo?.images?.[0] ||
-            productInfo?.image ||
-            "https://via.placeholder.com/150",
+      return {
+        _id: order._id,
+        sessionId: order.sessionId,
+        transactionId: order.transactionId,
+        amount: order.amount,
+        currency: order.currency,
+        paymentStatus: order.paymentStatus,
+        orderStatus: order.orderStatus,
+        createdAt: order.createdAt,
+        buyerInfo: order.buyerInfo,
+        sellerInfo: order.sellerInfo || productInfo?.sellerInfo || null,
 
-          productPrice:
-            order.productPrice ||
-            productInfo?.price ||
-            0,
 
-          sellerInfo:
-            order.sellerInfo ||
-            productInfo?.sellerInfo ||
-            null
-        };
-      })
-    );
+        productId: order.productId,
 
-    res.send(ordersWithProductDetails);
+        productTitle: savedDetails.title || productInfo?.title || "Product Unavailable",
+        productImage: savedDetails.image || productInfo?.image || productInfo?.images?.[0] || "https://via.placeholder.com/150",
+        productPrice: savedDetails.price || productInfo?.price || order.amount || 0
+      };
+    });
+
+    res.send(finalOrders);
 
   } catch (error) {
-    console.error("Failed to fetch orders:", error);
-
     res.status(500).send({
       success: false,
-      message: "Failed to fetch orders"
+      message: "Failed to fetch orders",
+      error: error.message
     });
   }
 });
@@ -1094,22 +982,22 @@ app.patch('/api/orders/:id/cancel', verifyToken, verifyBuyer, async (req, res) =
     const orderId = req.params.id;
     const query = { _id: new ObjectId(orderId) };
 
-
     const order = await ordersCollection.findOne(query);
     if (!order) {
       return res.status(404).send({ message: "Order not found" });
     }
 
+    if (order.buyerInfo?.email !== req.user?.email) {
+      return res.status(403).send({ message: "Forbidden! You can only cancel your own orders." });
+    }
 
     if (order.orderStatus !== 'pending' && order.orderStatus !== 'processing') {
       return res.status(400).send({ message: "Order cannot be cancelled at this stage." });
     }
 
-
-    const updateResult = await ordersCollection.updateOne(query, {
+    await ordersCollection.updateOne(query, {
       $set: { orderStatus: "cancelled" }
     });
-
 
     await productsCollection.updateOne(
       { _id: new ObjectId(order.productId) },
@@ -1119,9 +1007,16 @@ app.patch('/api/orders/:id/cancel', verifyToken, verifyBuyer, async (req, res) =
       }
     );
 
-    res.send({ success: true, message: "Order cancelled successfully and product restocked." });
+    res.send({
+      success: true,
+      message: "Order cancelled successfully and product restocked."
+    });
+
   } catch (error) {
-    res.status(500).send({ message: "Failed to cancel order", error });
+    res.status(500).send({
+      message: "Failed to cancel order",
+      error: error.message
+    });
   }
 });
 
@@ -1181,37 +1076,61 @@ app.get('/api/wishlist/user/:email', verifyToken, verifyBuyer, async (req, res) 
   try {
     const email = req.params.email;
 
+    if (email !== req.user?.email) {
+      return res.status(403).send({ message: "Forbidden Access" });
+    }
 
     const user = await usersCollection.findOne({ email });
     if (!user) {
       return res.status(404).send({ message: "User not found" });
     }
 
-    const wishlistItems = await wishlistCollection
-      .find({ userId: user._id.toString() })
-      .sort({ createdAt: -1 }) // newest first
-      .toArray();
+    const itemsWithProductDetails = await wishlistCollection.aggregate([
+      { $match: { userId: user._id.toString() } },
+      { $sort: { createdAt: -1 } },
+      {
+        $addFields: {
+          convertedProductId: {
+            $cond: {
+              if: { $eq: [{ $type: "$productId" }, "string"] },
+              then: { $toObjectId: "$productId" },
+              else: "$productId"
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: "products",
+          localField: "convertedProductId",
+          foreignField: "_id",
+          as: "productInfo"
+        }
+      },
+      {
+        $unwind: {
+          path: "$productInfo",
+          preserveNullAndEmptyArrays: true
+        }
+      }
+    ]).toArray();
 
-
-    const itemsWithProductDetails = await Promise.all(wishlistItems.map(async (item) => {
-      let productInfo = null;
-      try {
-        productInfo = await productsCollection.findOne({ _id: new ObjectId(item.productId) });
-      } catch (err) { }
-
+    const finalWishlist = itemsWithProductDetails.map(item => {
+      const product = item.productInfo;
       return {
         _id: item._id,
         productId: item.productId,
-        productTitle: productInfo?.title || "Product Unavailable",
-        productImage: productInfo?.images?.[0] || productInfo?.image || "https://via.placeholder.com/150",
-        productPrice: productInfo?.price || 0,
-        stock: productInfo?.stock || 0
+        productTitle: product?.title || "Product Unavailable",
+        productImage: product?.images?.[0] || product?.image || "https://via.placeholder.com/150",
+        productPrice: product?.price || 0,
+        stock: product?.stock || 0
       };
-    }));
+    });
 
-    res.send(itemsWithProductDetails);
+    res.send(finalWishlist);
+
   } catch (error) {
-    res.status(500).send({ message: "Failed to fetch wishlist", error });
+    res.status(500).send({ message: "Failed to fetch wishlist", error: error.message });
   }
 });
 
@@ -1349,11 +1268,15 @@ app.get('/api/payments/buyer/:email', verifyToken, verifyBuyer, async (req, res)
   try {
     const { email } = req.params;
 
-    const payments = await paymentsCollection
+    if (email !== req.user?.email) {
+      return res.status(403).send({ success: false, message: "Forbidden Access" });
+    }
+
+    const payments = await ordersCollection
       .find({
         "buyerInfo.email": email,
       })
-      .sort({ createdAt: -1 }) 
+      .sort({ createdAt: -1 })
       .toArray();
 
     res.send({
@@ -1361,15 +1284,13 @@ app.get('/api/payments/buyer/:email', verifyToken, verifyBuyer, async (req, res)
       data: payments,
     });
   } catch (error) {
-    console.log(error);
-
     res.status(500).send({
       success: false,
       message: "Internal server error",
+      error: error.message
     });
   }
 });
-
 
 // admin
 app.patch('/api/admin/users/:id/status', verifyToken, verifyAdmin, async (req, res) => {
