@@ -1,66 +1,51 @@
 const express = require('express');
 const cors = require('cors');
-const app = express()
-const port = 9000
-
-
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY)
 
+const app = express();
+const port = process.env.PORT || 9000;
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+app.use(cors());
+app.use(express.json());
 
+app.get('/', (req, res) => {
 
-app.use(cors())
+  res.send('Hello World!')
 
+})
+
+const uri = process.env.MONGO_DB_URI;
+
+// let client;
 // let database;
 // let productsCollection;
 // let ordersCollection;
 // let wishlistCollection;
 // let usersCollection;
 // let paymentsCollection;
-// let paymentsCollect;
-
-
-app.use(express.json());
-
-// verifyToken
+// let sessionCollection;
 
 
 
-
-
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-
-app.get('/', (req, res) => {
-  res.send('Hello World!')
-})
-
-
-
-
-
-
-const uri = process.env.MONGO_DB_URI;
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
-const client = new MongoClient(uri, {
+client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
+  // maxPoolSize: 10,
+  // serverSelectionTimeoutMS: 5000,
 });
 
-
 client.connect(() => {
+
   console.log('connecting to mongo db')
+
 }).catch(console.dir)
-
-// async function run() {
-//   try {
-//     // Connect the client to the server	(optional starting in v4.7)
-
-//     await client.connect();
 const database = client.db("ri-resell-hub-client");
+
 const productsCollection = database.collection("products");
 const ordersCollection = database.collection("orders");
 const wishlistCollection = database.collection("wishlist");
@@ -70,42 +55,39 @@ const sessionCollection = database.collection('session');
 
 
 
+
+
 const verifyToken = async (req, res, next) => {
-
   const authHeader = req.headers?.authorization;
-  // console.log(authHeader);
   if (!authHeader) {
-    return res.status(401).send({ message: 'unauthorized access' })
+    return res.status(401).send({ message: 'unauthorized access' });
   }
 
-  const token = authHeader.split(' ')[1]
-
+  const token = authHeader.split(' ')[1];
   if (!token) {
-    return res.status(401).send({ message: 'unauthorized access' })
+    return res.status(401).send({ message: 'unauthorized access' });
   }
 
-  const query = { token: token }
+  const query = { token: token };
   const session = await sessionCollection.findOne(query);
 
   if (!session) {
-    return res.status(401).send({ message: 'unauthorized access' })
+    return res.status(401).send({ message: 'unauthorized access' });
   }
 
   const userId = session.userId;
-
-
-  const userQuery = {
-    _id: userId
-  }
+  const userQuery = { _id: typeof userId === 'string' ? new ObjectId(userId) : userId };
 
   const user = await usersCollection.findOne(userQuery);
   if (!user) {
-    return res.status(401).send({ message: 'unauthorized access' })
+    return res.status(401).send({ message: 'unauthorized access' });
   }
-  // set data in the req object
+
   req.user = user;
   next();
-}
+};
+
+
 
 const verifyBuyer = async (req, res, next) => {
   if (req.user?.userRole !== 'buyer') {
@@ -139,11 +121,16 @@ app.get("/api/all/products", async (req, res) => {
       search = "",
       category,
       condition,
+      sort,
       page = 1,
       limit = 12,
     } = req.query;
 
-    const query = {};
+    const query = {
+      status: {
+        $in: ["available", "sold"],
+      },
+    };
 
     if (status) {
       query.status = {
@@ -176,11 +163,18 @@ app.get("/api/all/products", async (req, res) => {
       query.condition = condition;
     }
 
+    let sortOption = { createdAt: -1 };
+    if (sort === "price_asc") {
+      sortOption = { price: 1 };
+    } else if (sort === "price_desc") {
+      sortOption = { price: -1 };
+    }
+
     const total = await productsCollection.countDocuments(query);
 
     const products = await productsCollection
       .find(query)
-      .sort({ createdAt: -1 })
+      .sort(sortOption)
       .skip((Number(page) - 1) * Number(limit))
       .limit(Number(limit))
       .toArray();
@@ -191,8 +185,6 @@ app.get("/api/all/products", async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
-
     res.status(500).send({
       success: false,
       message: error.message,
@@ -203,6 +195,11 @@ app.get("/api/all/products", async (req, res) => {
 app.get('/api/all/products/:id', async (req, res) => {
   try {
     const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid product ID format" });
+    }
+
     const query = { _id: new ObjectId(id) };
     const result = await productsCollection.findOne(query);
 
@@ -212,7 +209,7 @@ app.get('/api/all/products/:id', async (req, res) => {
 
     res.send(result);
   } catch (error) {
-    res.status(500).send({ message: "Failed to fetch product", error });
+    res.status(500).send({ message: "Failed to fetch product", error: error.message });
   }
 });
 
@@ -299,7 +296,7 @@ app.get('/api/products', verifyToken, verifySeller, async (req, res) => {
 
   res.send(result);
 });
-app.delete('/api/products/:id', async (req, res) => {
+app.delete('/api/products/:id', verifyToken, verifySeller, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -321,7 +318,7 @@ app.delete('/api/products/:id', async (req, res) => {
 
 // For Edit Find That 
 
-app.get('/api/products/:id', async (req, res) => {
+app.get('/api/products/:id', verifyToken, verifySeller, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -341,7 +338,7 @@ app.get('/api/products/:id', async (req, res) => {
 
 // update
 
-app.patch("/api/products/:id", async (req, res) => {
+app.patch("/api/products/:id", verifyToken, verifySeller, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -620,14 +617,14 @@ app.get('/api/seller/analytics/:sellerId', async (req, res) => {
 
     const monthlySales = await paymentsCollection.aggregate([
       {
-        
+
         $match: {
           "sellerInfo.userId": sellerId,
           paymentStatus: "paid"
         }
       },
       {
-        
+
         $group: {
           _id: { $month: "$createdAt" },
           totalRevenue: { $sum: { $ifNull: ["$amount", { $ifNull: ["$productDetails.price", 0] }] } },
@@ -635,7 +632,7 @@ app.get('/api/seller/analytics/:sellerId', async (req, res) => {
         }
       },
       {
-        
+
         $project: {
           _id: 0,
           month: "$_id",
@@ -661,14 +658,14 @@ app.get('/api/seller/top-products/:sellerId', async (req, res) => {
 
     const products = await paymentsCollection.aggregate([
       {
-        
+
         $match: {
           "sellerInfo.userId": sellerId,
           paymentStatus: "paid"
         }
       },
       {
-        
+
         $group: {
           _id: "$productId",
           title: { $first: { $ifNull: ["$productDetails.title", "Premium Product"] } },
@@ -677,7 +674,7 @@ app.get('/api/seller/top-products/:sellerId', async (req, res) => {
         }
       },
       {
-        
+
         $project: {
           _id: 0,
           id: "$_id",
@@ -705,7 +702,7 @@ app.get('/api/seller/top-products/:sellerId', async (req, res) => {
 // buyer 
 
 
-app.post("/api/orders", async (req, res) => {
+app.post("/api/orders",  async (req, res) => {
   try {
     const { sessionId } = req.body;
 
@@ -842,7 +839,7 @@ app.post("/api/orders", async (req, res) => {
 
 
 // success page 
-app.get('/api/orders', async (req, res) => {
+app.get('/api/orders', verifyToken, verifyBuyer, async (req, res) => {
   try {
     let { session_id } = req.query;
 
@@ -1354,7 +1351,7 @@ app.patch('/api/admin/users/:id/status', verifyToken, verifyAdmin, async (req, r
 });
 
 
-app.delete('/api/admin/users/:id', async (req, res) => {
+app.delete('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1383,24 +1380,39 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 });
 
 // admin manage product 
-
-app.get('/api/all/products', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/admin/all/products', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const query = {};
+    const { search, status } = req.query;
 
-    if (req.query.status) {
-      query.status = req.query.status;
+    let findQuery = {
+      status: {
+        $in: ["available", "pending", "rejected", "sold"]
+      }
+    };
+
+    if (status && status !== 'all') {
+      findQuery.status = status;
+    }
+
+    if (search) {
+      findQuery.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
     }
 
     const result = await productsCollection
-      .find(query)
+      .find(findQuery)
+      .sort({ createdAt: -1 })
       .toArray();
 
     res.send(result);
+
   } catch (error) {
     res.status(500).send({
+      success: false,
       message: "Failed to fetch products",
-      error
+      error: error.message,
     });
   }
 });
@@ -1508,55 +1520,84 @@ app.delete('/api/admin/products/:id', verifyToken, verifyAdmin, async (req, res)
 
 app.get('/api/admin/orders', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const result = await ordersCollection
-      .aggregate([
-        {
-          $lookup: {
-            from: 'products',
-            let: {
-              productObjectId: {
-                $toObjectId: '$productId',
+    const { search, status } = req.query;
+    let matchQuery = {};
+
+    if (status && status !== 'all') {
+      matchQuery.orderStatus = status;
+    }
+
+    if (search) {
+      matchQuery.$or = [
+        { 'buyerInfo.name': { $regex: search, $options: 'i' } },
+        { 'buyerInfo.email': { $regex: search, $options: 'i' } },
+        { 'buyer.name': { $regex: search, $options: 'i' } },
+        { 'buyer.email': { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const pipeline = [];
+
+    if (Object.keys(matchQuery).length > 0) {
+      pipeline.push({ $match: matchQuery });
+    }
+
+    pipeline.push(
+      {
+        $lookup: {
+          from: 'products',
+          let: {
+            productObjectId: {
+              $toObjectId: '$productId',
+            },
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: ['$_id', '$$productObjectId'],
+                },
               },
             },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $eq: ['$_id', '$$productObjectId'],
-                  },
-                },
+            {
+              $project: {
+                title: 1,
+                price: 1,
+                images: 1,
+                category: 1,
+                status: 1,
               },
-              {
-                $project: {
-                  title: 1,
-                  price: 1,
-                  images: 1,
-                  category: 1,
-                  status: 1,
-                },
-              },
-            ],
-            as: 'productDetails',
-          },
+            },
+          ],
+          as: 'productDetails',
         },
-        {
-          $unwind: {
-            path: '$productDetails',
-            preserveNullAndEmptyArrays: true,
-          },
+      },
+      {
+        $unwind: {
+          path: '$productDetails',
+          preserveNullAndEmptyArrays: true,
         },
-        {
-          $sort: {
-            createdAt: -1,
-          },
-        },
-      ])
-      .toArray();
+      }
+    );
 
+    if (search) {
+      pipeline.push({
+        $match: {
+          'productDetails.title': { $regex: search, $options: 'i' }
+        }
+      });
+    }
+
+    pipeline.push({
+      $sort: {
+        createdAt: -1,
+      },
+    });
+
+    const result = await ordersCollection.aggregate(pipeline).toArray();
     res.send(result);
   } catch (error) {
     console.error(error);
-
     res.status(500).send({
       success: false,
       message: error.message,
