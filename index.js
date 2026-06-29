@@ -197,7 +197,7 @@ app.get('/api/all/products/:id', async (req, res) => {
     const id = req.params.id;
 
     if (!ObjectId.isValid(id)) {
-      return res.status(400).send({ message: "Invalid product ID format" });
+      return res.status(400).send({ message: "Invalid product ID format" , ok:false });
     }
 
     const query = { _id: new ObjectId(id) };
